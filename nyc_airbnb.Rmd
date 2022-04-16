@@ -1,0 +1,1091 @@
+---
+title: "nyc_airbnb"
+output: pdf_document
+---
+
+INTRODUCTION 
+
+Predicting pricing is one of the more common uses of machine learning. Whether it is predicting the cost of flights in the near future or estimating the current market value of a home, there are many applications for these types of prediction algorithms. 
+
+In this report, we will discuss the methods and processes for building an algorithm that will predict the nightly costs of airbnb rentals in New York City. This data set is available on Kaggle and contains airbnb listings in New York City from 2019.
+
+The data set includes information about the name of the listing and host, neighborhood, neighborhood group (borough), latitude, longitude, room type, minimum length of stay, number of reviews, reviews per month, date of last review, lists per host, and availability of the listing over the past 365 days.
+
+The goal of this project is to be able to accurately predict the nightly rate of an airbnb listing in New York City in 2019 given its features. In order to do so, we will explore the data set, wrangle any features to accommodate our use cases, build a variety of models optimized to minimize our loss function (Root Mean Squared Error or RMSE), and lastly discuss our results, limitations, and future improvements.
+
+METHODS/ANALYSIS
+
+The first step in our analysis is to import the data set and examine the data.
+
+``` {r import and examine data}
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(data.table)) install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(recosystem)) install.packages("recosystem", repos = "http://cran.us.r-project.org")
+
+library(tidyverse)
+library(caret)
+library(data.table)
+library(recosystem)
+
+# This data set was imported from Kaggle. It is available at:
+# https://www.kaggle.com/dgomonov/new-york-city-airbnb-open-data
+airbnb_nyc <- read_csv("./airbnb_nyc.csv")
+
+airbnb_nyc %>% as_tibble()
+
+glimpse(airbnb_nyc)
+```
+
+We see that we have 38,277 rows as well as 18 columns which include listing name, host name, neighborhood, neighborhood group, and room type in addition to many other features. 
+
+The most important rule in real estate is "location, location, location" so it is safe to assume that neighborhood or neighborhood group will have some effect on our pricing.
+
+We can also see that there are some "NA" values in our data set. For the "reviews_per_month" column, for our purposes we may assume that they are zero if the current value is "NA." However, there is a chance for some newly introduced inaccuracy if the NA were to be a result of a clerical error.
+
+``` {r na value in reviews_per_month}
+airbnb_nyc$reviews_per_month[is.na(airbnb_nyc$reviews_per_month)] <- 0
+```
+
+We also see some "NA" values for the title field. For this field we can substitute the value to be an empty string. However, there is still the same risk of it being a clerical error.
+
+``` {r na value in title}
+airbnb_nyc$name[is.na(airbnb_nyc$name)] <- ""
+```
+
+Next, we see that the "license" field is "NA" for almost all of the rows. Therefore, we will remove this column since it cannot be used in our models.
+
+``` {r removal of license field}
+airbnb_nyc <- subset(airbnb_nyc, select = -c(license, name, host_name))
+```
+
+We can also see that some listings have yet to be rated; therefore, some listings have the last reviewed date as "NA." To combat this, we will substitute an absurd date (Jan 1, 1900) to fill in the missing dates.
+
+``` {r fill in missing dates}
+airbnb_nyc$last_review[is.na(airbnb_nyc$last_review)] <- as.Date('1900-01-01', format="%Y-%m-%d")
+```
+
+After doing so, we can convert the date objects to be a more useful form for us: days since review.
+
+``` {r convert date to days since review}
+airbnb_nyc <- airbnb_nyc %>% 
+  mutate(last_review = as.numeric(
+    difftime(as.Date('2022-03-31', format="%Y-%m-%d"), airbnb_nyc$last_review, units = "days")
+  ))
+
+names(airbnb_nyc)[names(airbnb_nyc) == "last_review"] <- "days_since_review"
+head(airbnb_nyc)
+```
+Looking at the column names, we see that the column with the different boroughs of New York City is named "neighbourhood_group." To make this title more accurate, we will rename it to "borough."
+
+``` {r rename neighbourhood_group to borough}
+names(airbnb_nyc)[names(airbnb_nyc) == "neighbourhood_group"] <- "borough"
+head(airbnb_nyc)
+```
+
+We also see that there is a column called "neighbourhood." Although this is minor, we should "Americanize" the spelling to "neighborhood."
+
+``` {r rename neighbourhood to neighborhood}
+names(airbnb_nyc)[names(airbnb_nyc) == "neighbourhood"] <- "neighborhood"
+head(airbnb_nyc)
+```
+
+Examining the types of the features, we see that neighborhood, neighborhood group, and room type are represented as "characters" when they are factors. Let's convert those types to factors
+
+``` {r type conversion}
+airbnb_nyc$neighborhood <- as.factor(airbnb_nyc$neighborhood)
+airbnb_nyc$borough <- as.factor(airbnb_nyc$borough)
+airbnb_nyc$room_type <- as.factor(airbnb_nyc$room_type)
+```
+
+We will now examine the data set once more.
+
+``` {r data set exploration}
+# Let's explore the features and classes once more
+glimpse(airbnb_nyc)
+```
+
+We can see that now all the field types are as expected!
+
+Let's now explore how many unique listings, hosts, neighborhoods, boroughs, and room types there are.
+
+``` {r unique fields}
+airbnb_nyc %>% summarize(unique_listings = length(unique(id)),
+                  unique_hosts = length(unique(host_id)),
+                  unique_neighborhoods = length(unique(neighborhood)),
+                  unique_boroughs = length(unique(borough)),
+                  unique_room_types = length(unique(room_type)))
+```
+
+We see that there are 38,277 unique listings, 25,904 hosts, 222 neighborhoods, 5 neighborhood groups, and 4 room types.
+
+Now let's explore the most expensive airbnb listings.
+
+``` {r most expensive listings}
+# Let's now look at the most expensive airbnbs.
+airbnb_nyc %>% arrange(-price)
+```
+
+We see that there are some listings that are $10,000 per night. While these figures would be absurd in most cities, it is totally possible in New York City.
+
+Now let's explore the least expensive listings.
+
+``` {r least expensive listings}
+# Now let's look at the least expensive airbnbs.
+airbnb_nyc %>% arrange(price)
+```
+
+We see that some listings have a nightly rate of $0. Although it is possible for a listing to be very cheap, it is improbable at best that a listing is offering a free night's stay. Let's remove these data points from our data set.
+
+``` {r remove invalid listings}
+airbnb_nyc <- airbnb_nyc %>%
+  filter(price > 0) %>% 
+  arrange(price)
+```
+
+Let us now explore the least expensive listings after filtering out the invalid listings.
+
+``` {r examine cheapest listings}
+airbnb_nyc %>% arrange(price)
+```
+
+These figures make more sense!
+
+Next, we should examine the distribution of listings across the most important factors. For our use case, the biggest factors will most likely be the neighborhood, availability over the past 365 days, and the room type. 
+
+In real estate, the neighborhood holds the greatest impact on price. In pricing short-term rentals, there are vastly different price ranges for private rooms versus hotel rooms. Moreover, depending on how often the rental has been rented in the past year, the price will be "market adjusted" to be more competitive.
+
+Let's examine the distribution of listings across neighborhoods.
+
+``` {r neighborhood listing distribution}
+airbnb_nyc %>% 
+  group_by(neighborhood) %>% 
+  summarize(n_listings = n()) %>% 
+  ggplot(aes(n_listings))+
+  geom_histogram(fill = "slategray3", color = "black", bins = 35) +
+  scale_x_log10()+
+  ggtitle("Neighborhood Distribution")+
+  xlab("Listings")+
+  ylab("Neighborhoods")+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+We see an approximately normal distribution.
+
+Next, let's examine the distribution of listings across various availabilities over the past 365 days.
+
+``` {r availability distribution}
+airbnb_nyc %>% 
+  group_by(availability_365) %>% 
+  summarize(n_listings = n()) %>% 
+  ggplot(aes(n_listings))+
+  geom_histogram(fill = "slategray3", color = "black", bins = 35) +
+  scale_x_log10()+
+  ggtitle("Availability Distribution")+
+  xlab("Listings")+
+  ylab("Availability")+
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+Once again, we see an approximately normal distribution of listings across availabilities!
+
+Next, we will examine the average nightly rate for each of the boroughs.
+
+``` {r average rate per borough}
+airbnb_nyc %>%
+  group_by(borough) %>%
+  summarize(avg_nightly_rate = mean(price)) %>%
+  ggplot(aes(borough, avg_nightly_rate)) + 
+  geom_bar(stat="identity", fill = "slategray3") + 
+  ggtitle("Average Nightly Rates by Borough") +
+  xlab("Borough") +
+  ylab("Average Nightly Rate") + 
+  theme(plot.title = element_text(hjust = 0.5))
+```
+
+We see that the most expensive borough is Manhattan which makes sense. We see that the least expensive borough is the Bronx which also makes sense. 
+
+Now let's examine the most expensive neighborhoods.
+
+``` {r expensive neighborhoods}
+airbnb_nyc %>%
+  group_by(neighborhood) %>%
+  summarize(avg_nightly_rate = mean(price), listing_count = n()) %>%
+  arrange(-avg_nightly_rate)
+```
+
+We see that Jamaica Estates in Queens is listed as the most expensive neighborhood in New York which doesn't sounds right. This leads us to believe that there are outliers that we need to remove.
+
+As mentioned, the biggest two factors in price will be room type and borough. Knowing how vastly different the price ranges can be for various boroughs and room types, we should clip the outliers for each of the filtered borough and room type subcategories.
+
+To make our code shorter, we will define a function that will handle the outlier identification for us given a specific subcategory.
+
+``` {r common outlier function}
+find_outliers <- function(listing_group) {
+  lower_percentile <- 0.25
+  upper_percentile <- 0.75
+  lower_bound <- quantile(listing_group$price, lower_percentile)
+  upper_bound <- quantile(listing_group$price, upper_percentile)
+  outliers <- listing_group %>%
+    filter(price > upper_bound | price < lower_bound)
+  outliers
+}
+```
+
+Next, we will filter by borough and room type and then clip the upper and lower outliers.
+
+``` {r cut out outliers}
+shared_rooms <- airbnb_nyc %>%
+  filter(room_type == "Shared room")
+
+###################################
+
+shared_bronx_rooms <- shared_rooms %>%
+  filter(borough == "Bronx")
+
+# Let's first check the dimensions to make sure this is a valid subcategory.
+dim(shared_bronx_rooms)
+
+outliers <- find_outliers(shared_bronx_rooms)
+airbnb_nyc <- anti_join(airbnb_nyc, outliers)
+
+###################################
+
+shared_brooklyn_rooms <- shared_rooms %>%
+  filter(borough == "Brooklyn")
+
+dim(shared_brooklyn_rooms)
+
+outliers <- find_outliers(shared_brooklyn_rooms)
+airbnb_nyc <- anti_join(airbnb_nyc, outliers)
+
+###################################
+
+shared_manhattan_rooms <- shared_rooms %>%
+  filter(borough == "Manhattan")
+
+dim(shared_manhattan_rooms)
+
+outliers <- find_outliers(shared_manhattan_rooms)
+airbnb_nyc <- anti_join(airbnb_nyc, outliers)
+
+###################################
+
+shared_queens_rooms <- shared_rooms %>%
+  filter(borough == "Queens")
+
+dim(shared_queens_rooms)
+
+outliers <- find_outliers(shared_queens_rooms)
+airbnb_nyc <- anti_join(airbnb_nyc, outliers)
+
+###################################
+
+shared_si_rooms <- shared_rooms %>%
+  filter(borough == "Staten Island")
+
+dim(shared_si_rooms)
+
+outliers <- find_outliers(shared_si_rooms)
+airbnb_nyc <- anti_join(airbnb_nyc, outliers)
+
+###################################
+###################################
+###################################
+
+private_rooms <- airbnb_nyc %>%
+  filter(room_type == "Private room")
+
+###################################
+
+private_bronx_rooms <- private_rooms %>%
+  filter(borough == "Bronx")
+
+dim(private_bronx_rooms)
+
+outliers <- find_outliers(private_bronx_rooms)
+airbnb_nyc <- anti_join(airbnb_nyc, outliers)
+
+###################################
+
+private_brooklyn_rooms <- private_rooms %>%
+  filter(borough == "Brooklyn")
+
+dim(private_brooklyn_rooms)
+
+outliers <- find_outliers(private_brooklyn_rooms)
+airbnb_nyc <- anti_join(airbnb_nyc, outliers)
+
+###################################
+
+private_manhattan_rooms <- private_rooms %>%
+  filter(borough == "Manhattan")
+
+dim(private_manhattan_rooms)
+
+outliers <- find_outliers(private_manhattan_rooms)
+airbnb_nyc <- anti_join(airbnb_nyc, outliers)
+
+###################################
+
+private_queens_rooms <- private_rooms %>%
+  filter(borough == "Queens")
+
+dim(private_queens_rooms)
+
+outliers <- find_outliers(private_queens_rooms)
+airbnb_nyc <- anti_join(airbnb_nyc, outliers)
+
+###################################
+
+private_si_rooms <- private_rooms %>%
+  filter(borough == "Staten Island")
+
+dim(private_si_rooms)
+
+outliers <- find_outliers(private_si_rooms)
+airbnb_nyc <- anti_join(airbnb_nyc, outliers)
+
+###################################
+###################################
+###################################
+
+entire_place <- airbnb_nyc %>%
+  filter(room_type == "Entire home/apt")
+
+###################################
+
+entire_bronx_place <- entire_place %>%
+  filter(borough == "Bronx")
+
+dim(entire_bronx_place)
+
+outliers <- find_outliers(entire_bronx_place)
+airbnb_nyc <- anti_join(airbnb_nyc, outliers)
+
+###################################
+
+entire_brooklyn_place <- entire_place %>%
+  filter(borough == "Brooklyn")
+
+dim(entire_brooklyn_place)
+
+outliers <- find_outliers(entire_brooklyn_place)
+airbnb_nyc <- anti_join(airbnb_nyc, outliers)
+
+###################################
+
+entire_manhattan_place <- entire_place %>%
+  filter(borough == "Manhattan")
+
+dim(entire_manhattan_place)
+
+outliers <- find_outliers(entire_manhattan_place)
+airbnb_nyc <- anti_join(airbnb_nyc, outliers)
+
+###################################
+
+entire_queens_place <- entire_place %>%
+  filter(borough == "Queens")
+
+dim(entire_queens_place)
+
+outliers <- find_outliers(entire_queens_place)
+airbnb_nyc <- anti_join(airbnb_nyc, outliers)
+
+###################################
+
+entire_si_place <- entire_place %>%
+  filter(borough == "Staten Island")
+
+dim(entire_si_place)
+
+outliers <- find_outliers(entire_si_place)
+airbnb_nyc <- anti_join(airbnb_nyc, outliers)
+
+###################################
+###################################
+###################################
+
+hotel_room <- airbnb_nyc %>%
+  filter(room_type == "Hotel room")
+
+###################################
+
+bronx_hotel <- hotel_room %>%
+  filter(borough == "Bronx")
+
+dim(bronx_hotel)
+
+# There doesn't look to be any hotels in the Bronx
+
+###################################
+
+brooklyn_hotel <- hotel_room %>%
+  filter(borough == "Brooklyn")
+
+dim(brooklyn_hotel)
+
+outliers <- find_outliers(brooklyn_hotel)
+airbnb_nyc <- anti_join(airbnb_nyc, outliers)
+
+###################################
+
+manhattan_hotel <- hotel_room %>%
+  filter(borough == "Manhattan")
+
+dim(manhattan_hotel)
+
+outliers <- find_outliers(manhattan_hotel)
+airbnb_nyc <- anti_join(airbnb_nyc, outliers)
+
+###################################
+
+queens_hotel <- hotel_room %>%
+  filter(borough == "Queens")
+
+dim(queens_hotel)
+
+outliers <- find_outliers(queens_hotel)
+airbnb_nyc <- anti_join(airbnb_nyc, outliers)
+
+###################################
+
+si_hotel <- hotel_room %>%
+  filter(borough == "Staten Island")
+
+dim(si_hotel)
+```
+
+Now that the outliers have been removed, we are now ready to split our data sets into the training, test, and validation sets.
+
+``` {r split data set}
+set.seed(1, sample.kind="Rounding")
+test_index <- createDataPartition(y = airbnb_nyc$price, times = 1, p = 0.1, list = FALSE)
+airbnb_train <- airbnb_nyc[-test_index,]
+validation <- airbnb_nyc[test_index,]
+
+set.seed(1, sample.kind="Rounding")
+test_index <- createDataPartition(y = airbnb_train$price, times = 1, p = 0.1, list = FALSE)
+train_set <- airbnb_train[-test_index,]
+test_set <- airbnb_train[test_index,]
+```
+
+Next, we need to make sure our test and validation sets contain the same factors that we will be building our models on: neighborhood, room type, and availability over the past 365 days.
+
+``` {r filter test and validation}
+test_set <- test_set %>% 
+  semi_join(train_set, by = "neighborhood") %>%
+  semi_join(train_set, by = "room_type")%>%
+  semi_join(train_set, by = "availability_365")
+
+validation <- validation %>% 
+  semi_join(train_set, by = "neighborhood") %>%
+  semi_join(train_set, by = "room_type") %>%
+  semi_join(train_set, by = "availability_365")
+```
+
+For our modeling, we will use least squared estimates and incorporate the three key factors that would most likely impact pricing: neighborhood, availability from the past 365 days, and room type. Next, we will build a model using matrix factorization.
+
+The first model we will build is the "mean model" where we will predict all of the test set prices to be the mean of the training set prices. This will be our "benchmark" model. 
+
+Next, we will build our first least squared estimates model with the neighborhood effects or bias factored in. Then we will build another model with the neighborhood and availability effects incorporated. Lastly, we will build a model with the neighborhood, availability, and room type effects incorporated.
+
+Then, we incorporate regularization to see if we could tune our models to be even more accurate.
+
+Following this, we will build our matrix factorization model. 
+
+Lastly, we will test all of our models once more on our validation set.
+
+To measure the performance of our models, we will use root mean squared error as our loss function. The function for calculating the RMSE is as shown below.
+
+``` {r RMSE function}
+RMSE <- function(true_price, predicted_price){
+  sqrt(mean((true_price - predicted_price)^2))
+}
+```
+
+RESULTS
+
+Let's first start off with our mean model. We will predict the mean of the training set prices for all of the listings in the training set.
+
+In validating our models, we will first test on our test set.
+
+``` {r mean model}
+mu_hat <- mean(train_set$price)
+naive_rmse <- RMSE(test_set$price, mu_hat)
+```
+
+Let's now visualize the results in a chart.
+
+``` {r results chart}
+results <- tibble(Model_Type = "Mean Model", RMSE = naive_rmse) %>%
+  mutate(RMSE = sprintf("%0.4f", RMSE))
+results
+```
+
+We see an RMSE of 60.1709. This isn't too bad of an error for a listing that is priced in the thousands but a terrible one for a listing that's in the tens. Let's see if we can get this number down.
+
+We will now build our first model incorporating the neighborhood effects and visualize the results. 
+
+``` {r neighborhood model}
+mu <- mean(train_set$price)
+bi_avgs <- train_set %>%
+  group_by(neighborhood) %>%
+  summarize(b_i = mean(price - mu))
+
+bi_predictions <- mu + test_set %>%
+  left_join(bi_avgs, by = "neighborhood") %>%
+  pull(b_i)
+bi_rmse <- RMSE(test_set$price, bi_predictions)
+# Let's visualize the results in a table
+results <- tibble(Model_Type = c(
+  "Mean Model",
+  "Neighborhood Model"
+), RMSE = c(
+  naive_rmse,
+  bi_rmse
+)) %>%
+  mutate(RMSE = sprintf("%0.4f", RMSE))
+results
+```
+
+We see our RMSE drop to 52.2709! Let's see if we can get that number even lower once we incorporate the availability over the past 365 days.
+
+``` {r neighborhood & availability model}
+bu_avgs <- train_set %>%
+  left_join(bi_avgs, by = "neighborhood") %>%
+  group_by(availability_365) %>%
+  summarize(b_u = mean(price - mu - b_i))
+bu_predictions <- test_set %>%
+  left_join(bi_avgs, by = "neighborhood") %>%
+  left_join(bu_avgs, by = "availability_365")  %>%
+  mutate(pred = mu + b_i + b_u) %>%
+  pull(pred)
+bu_rmse <- RMSE(test_set$price, bu_predictions)
+
+# Let's once again visualize the results in a table
+results <- tibble(Model_Type = c(
+  "Mean Model",
+  "Neighborhood Model",
+  "Neighborhood & Availability 365 Model"
+), RMSE = c(
+  naive_rmse,
+  bi_rmse,
+  bu_rmse
+)) %>%
+  mutate(RMSE = sprintf("%0.4f", RMSE))
+results
+```
+
+We see our RMSE drop even further to 52.8127. Now let's see how room type affects our predictions.
+
+``` {r neighborhood, availability, & room type model}
+bv_avgs <- train_set %>%
+  left_join(bi_avgs, by = "neighborhood") %>%
+  left_join(bu_avgs, by = "availability_365") %>%
+  group_by(room_type) %>%
+  summarize(b_v = mean(price - mu - b_i - b_u))
+bv_predictions <- test_set %>%
+  left_join(bi_avgs, by = "neighborhood") %>%
+  left_join(bu_avgs, by = "availability_365") %>%
+  left_join(bv_avgs, by = "room_type") %>%
+  mutate(pred = mu + b_i + b_u + b_v) %>%
+  pull(pred)
+bv_rmse <- RMSE(test_set$price, bv_predictions)
+
+# Let's once again visualize the results in a table
+results <- tibble(Model_Type = c(
+  "Mean Model",
+  "Neighborhood Model",
+  "Neighborhood & Availability 365 Model",
+  "Neighborhood, Availability 365, & Room Type Model"
+), RMSE = c(
+  naive_rmse,
+  bi_rmse,
+  bu_rmse,
+  bv_rmse
+)) %>%
+  mutate(RMSE = sprintf("%0.4f", RMSE))
+results
+```
+
+We can see a great improvement with our RMSE dropping to 34.2903.
+
+Next we will tune our models to refine our accuracy even further.
+
+First, we will tune our neighborhood and availability effects model. To do so, we need to find the lambda value which minimizes our RMSE.
+
+``` {r neighborhood & availability tuning}
+lambdas <- seq(0, 100, 1)
+RMSES <- sapply(lambdas, function(l){
+  train_mean <- mean(train_set$price)
+  
+  bi <- train_set %>%
+    group_by(neighborhood) %>%
+    summarize(bi = sum(price - train_mean)/(n() + l))
+  
+  bu <- train_set %>%
+    left_join(bi, by='neighborhood') %>% 
+    group_by(availability_365) %>%
+    summarize(bu = sum(price - bi - train_mean)/(n() + l))
+  
+  predictions <- test_set %>%
+    left_join(bi, by = "neighborhood") %>%
+    left_join(bu, by = "availability_365") %>%
+    mutate(pred = train_mean + bi +  bu) %>% 
+    .$pred
+  
+  return(RMSE(predictions, test_set$price))
+})
+
+na_model_lambda <- lambdas[which.min(RMSES)]
+na_model_lambda
+```
+
+We see that a lambda of 13 minimizes our RMSE. Let's now incorporate this lambda into our model and revisit its performance.
+
+``` {r neighborhood & availability model with reg}
+b_i <- train_set %>%
+  group_by(neighborhood) %>%
+  summarize(b_i = sum(price - mu)/(n() + na_model_lambda))
+b_u <- train_set %>%
+  left_join(b_i, by = "neighborhood") %>%
+  group_by(availability_365) %>%
+  summarize(b_u = sum(price - b_i - mu)/(n() + na_model_lambda))
+bu_predictions <- test_set %>%
+  left_join(b_i, by = "neighborhood") %>%
+  left_join(b_u, by = "availability_365") %>%
+  mutate(predictions = mu + b_i + b_u) %>%
+  .$predictions
+
+bu_reg_rmse <- RMSE(test_set$price, bu_predictions)
+
+results <- tibble(Model_Type = c(
+  "Mean Model",
+  "Neighborhood Model",
+  "Neighborhood & Availability 365 Model",
+  "Neighborhood, Availability 365, & Room Type Model",
+  "Neighborhood, Availability 365 Model w/ Reg"
+), RMSE = c(
+  naive_rmse,
+  bi_rmse,
+  bu_rmse,
+  bv_rmse,
+  bu_reg_rmse
+)) %>%
+  mutate(RMSE = sprintf("%0.4f", RMSE))
+results
+```
+
+We see a slight improvement in performance from our original model to achieve an RMSE of 52.1545.
+
+Let's now tune our neighborhood, availability, and room type effects model. We will once again find the lambda that minimizes our RMSE.
+
+``` {r find the lambda}
+lambdas <- seq(0, 100, 1)
+RMSES <- sapply(lambdas, function(l){
+  train_mean <- mean(train_set$price)
+  
+  bi <- train_set %>%
+    group_by(neighborhood) %>%
+    summarize(bi = sum(price - train_mean)/(n() + l))
+  
+  bu <- train_set %>%
+    left_join(bi, by='neighborhood') %>% 
+    group_by(availability_365) %>%
+    summarize(bu = sum(price - bi - train_mean)/(n() + l))
+  
+  br <- train_set %>%
+    left_join(bi, by = "neighborhood") %>%
+    left_join(bu, by = "availability_365") %>%
+    group_by(room_type) %>%
+    summarize(br = sum(price - bi - bu - train_mean)/(n() + l))
+  
+  predictions <- test_set %>%
+    left_join(bi, by = "neighborhood") %>%
+    left_join(bu, by = "availability_365") %>%
+    left_join(br, by = "room_type") %>%
+    mutate(pred = train_mean + bi +  bu + br) %>% 
+    .$pred
+  
+  return(RMSE(predictions, test_set$price))
+})
+
+nar_model_lambda <- lambdas[which.min(RMSES)]
+nar_model_lambda
+```
+
+We see a lambda of 70 minimizes our RMSE. Let's now rebuild our model with the lambda incorporated.
+
+``` {r neighborhood, availability, & room type model w/ reg}
+b_i <- train_set %>%
+  group_by(neighborhood) %>%
+  summarize(b_i = sum(price - mu)/(n() + nar_model_lambda))
+b_u <- train_set %>%
+  left_join(b_i, by = "neighborhood") %>%
+  group_by(availability_365) %>%
+  summarize(b_u = sum(price - b_i - mu)/(n() + nar_model_lambda))
+b_r <- train_set %>%
+  left_join(b_i, by = "neighborhood") %>%
+  left_join(b_u, by = "availability_365") %>%
+  group_by(room_type) %>%
+  summarize(b_r = sum(price - b_i - b_u - mu)/(n() + nar_model_lambda))
+
+bv_predictions <- test_set %>%
+  left_join(b_i, by = "neighborhood") %>%
+  left_join(b_u, by = "availability_365") %>%
+  left_join(b_r, by = "room_type") %>%
+  mutate(predictions = mu + b_i + b_u + b_r) %>%
+  .$predictions
+
+bv_reg_rmse <- RMSE(test_set$price, bv_predictions)
+
+# Let's visualize the results once more.
+results <- tibble(Model_Type = c(
+  "Mean Model",
+  "Neighborhood Model",
+  "Neighborhood & Availability 365 Model",
+  "Neighborhood, Availability 365, & Room Type Model",
+  "Neighborhood, Availability 365 Model w/ Reg",
+  "Neighborhood, Availability 365, & Room Type w/ Reg"
+), RMSE = c(
+  naive_rmse,
+  bi_rmse,
+  bu_rmse,
+  bv_rmse,
+  bu_reg_rmse,
+  bv_reg_rmse
+)) %>%
+  mutate(RMSE = sprintf("%0.4f", RMSE))
+results
+```
+
+We see a significant improvement to 30.9987 which is around a 10% improvement compared to the performance of our original model.
+
+Lastly, we will build a model with matrix factorization. To build our model, we will be using the "recosystem" library.
+
+``` {r matrix factorization}
+set.seed(1, sample.kind="Rounding")
+train_reco <- with(train_set, data_memory(user_index = neighborhood, item_index = room_type, rating = price))
+test_reco <- with(test_set, data_memory(user_index = neighborhood, item_index = room_type, rating = price))
+r <- Reco()
+
+para_reco <- r$tune(train_reco, opts = list(dim = c(20, 30),
+                                            costp_l2 = c(0.01, 0.1),
+                                            costq_l2 = c(0.01, 0.1),
+                                            lrate = c(0.01, 0.1),
+                                            nthread = 4,
+                                            niter = 10))
+
+r$train(train_reco, opts = c(para_reco$min, nthread = 4, niter = 30))
+results_reco <- r$predict(test_reco, out_memory())
+
+factorization_rmse <- RMSE(results_reco, test_set$price)
+
+# Let's visualize the results.
+
+results <- tibble(Model_Type = c(
+  "Mean Model",
+  "Neighborhood Model",
+  "Neighborhood & Availability 365 Model",
+  "Neighborhood, Availability 365, & Room Type Model",
+  "Neighborhood, Availability 365 Model w/ Reg",
+  "Neighborhood, Availability 365, & Room Type w/ Reg",
+  "Matrix Factorization"
+), RMSE = c(
+  naive_rmse,
+  bi_rmse,
+  bu_rmse,
+  bv_rmse,
+  bu_reg_rmse,
+  bv_reg_rmse,
+  factorization_rmse
+)) %>%
+  mutate(RMSE = sprintf("%0.4f", RMSE))
+results
+```
+
+We see a significant improvement in our model to achieve an RMSE under 30!
+
+Let's now retest our models on our validation set to further analyze their efficacy.
+
+As a benchmark, we will start with our mean model
+
+``` {r mean model validation}
+train_mean <- mean(train_set$price)
+validation_mean_model <- RMSE(validation$price, train_mean)
+
+results <- tibble(Model_Type = ("Mean Model"),
+                  Validation_RMSE = (validation_mean_model)) %>%
+  mutate(Validation_RMSE = sprintf("%0.5f", Validation_RMSE))
+results
+```
+
+We see an RMSE of 61.40009, not too far off from the value for the test set.
+
+Let's now build our neighborhood effects model.
+
+``` {r neighborhood effects}
+bi <- train_set %>% 
+  group_by(neighborhood) %>%
+  summarize(b_i = mean(price - train_mean))
+bi_prediction <- train_mean + validation %>%
+  left_join(bi, by = "neighborhood") %>%
+  .$b_i
+bi_rmse_validation <- RMSE(validation$price, bi_prediction)
+results <- tibble(Model_Type = c(
+  "Mean Model",
+  "Neighborhood Model"
+),
+Validation_RMSE = c(
+  validation_mean_model,
+  bi_rmse_validation
+)) %>%
+  mutate(Validation_RMSE = sprintf("%0.5f", Validation_RMSE))
+results
+```
+
+We see an RMSE of 52.68041 - slightly worse than how our model did on the test set.
+
+Now let's examine our neighborhood and availability effects model.
+
+``` {r neighborhood & availability model validation}
+bi <- train_set %>% 
+  group_by(neighborhood) %>%
+  summarize(b_i = mean(price - train_mean))
+bu <- train_set %>% 
+  left_join(bi, by = "neighborhood") %>%
+  group_by(availability_365) %>%
+  summarize(b_u = mean(price - train_mean - b_i))
+bu_prediction <- validation %>%
+  left_join(bi, by = "neighborhood") %>%
+  left_join(bu, by = "availability_365") %>%
+  mutate(predictions = train_mean + b_i + b_u) %>%
+  .$predictions
+bu_rmse_validation <- RMSE(validation$price, bu_prediction)
+results <- tibble(Model_Type = c(
+  "Mean Model",
+  "Neighborhood Model",
+  "Neighborhood & Availability 365 Model"
+),
+Validation_RMSE = c(
+  validation_mean_model,
+  bi_rmse_validation,
+  bu_rmse_validation
+)) %>%
+  mutate(Validation_RMSE = sprintf("%0.5f", Validation_RMSE))
+results
+```
+
+We achieved an RMSE of 52.53051 - slightly better than the performance on the test set.
+
+Now let's test our neighborhood, availability, & room type model.
+
+``` {r neighborhood, availability, & room type model validation}
+bi <- train_set %>% 
+  group_by(neighborhood) %>%
+  summarize(b_i = mean(price - train_mean))
+bu <- train_set %>% 
+  left_join(bi, by = "neighborhood") %>%
+  group_by(availability_365) %>%
+  summarize(b_u = mean(price - train_mean - b_i))
+br <- train_set %>%
+  left_join(bi, by = "neighborhood") %>%
+  left_join(bu, by = "availability_365") %>%
+  group_by(room_type) %>%
+  summarize(b_r = mean(price - train_mean - b_i - b_u))
+bv_prediction <- validation %>%
+  left_join(bi, by = "neighborhood") %>%
+  left_join(bu, by = "availability_365") %>%
+  left_join(br, by = "room_type") %>%
+  mutate(predictions = train_mean + b_i + b_u + b_r) %>%
+  .$predictions
+bv_val_rmse <- RMSE(validation$price, bv_prediction)
+results <- tibble(Model_Type = c(
+  "Mean Model",
+  "Neighborhood Model",
+  "Neighborhood & Availability 365 Model",
+  "Neighborhood, Availability 365, & Room Type Model"
+),
+Validation_RMSE = c(
+  validation_mean_model,
+  bi_rmse_validation,
+  bu_rmse_validation,
+  bv_val_rmse
+)) %>%
+  mutate(Validation_RMSE = sprintf("%0.5f", Validation_RMSE))
+results
+```
+
+We see an RMSE of 34.61761 - slightly worse than the test set's RMSE.
+
+Now let's see how our regularized neighborhood and availability model does.
+
+``` {r neighborhood & availability w/ reg}
+b_i <- train_set %>%
+  group_by(neighborhood) %>%
+  summarize(b_i = sum(price - mu)/(n() + na_model_lambda))
+b_u <- train_set %>%
+  left_join(b_i, by = "neighborhood") %>%
+  group_by(availability_365) %>%
+  summarize(b_u = sum(price - b_i - mu)/(n() + na_model_lambda))
+bu_val_predictions <- validation %>%
+  left_join(b_i, by = "neighborhood") %>%
+  left_join(b_u, by = "availability_365") %>%
+  mutate(predictions = mu + b_i + b_u) %>%
+  .$predictions
+
+bu_val_reg_rmse <- RMSE(validation$price, bu_val_predictions)
+
+results <- tibble(Model_Type = c(
+  "Mean Model",
+  "Neighborhood Model",
+  "Neighborhood & Availability 365 Model",
+  "Neighborhood, Availability 365, & Room Type Model",
+  "Neighborhood & Availability 365 Model w/ Reg"
+),
+Validation_RMSE = c(
+  validation_mean_model,
+  bi_rmse_validation,
+  bu_rmse_validation,
+  bv_val_rmse,
+  bu_val_reg_rmse
+)) %>%
+  mutate(Validation_RMSE = sprintf("%0.5f", Validation_RMSE))
+results
+```
+
+We achieve an RMSE of 52.37774 - slight worse than our test set RMSE.
+
+Now let's see how our regularized neighborhood, availability, and room type model performs.
+
+``` {r neighborhood, availability, room type model w/ reg}
+b_i <- train_set %>%
+  group_by(neighborhood) %>%
+  summarize(b_i = sum(price - mu)/(n() + nar_model_lambda))
+b_u <- train_set %>%
+  left_join(b_i, by = "neighborhood") %>%
+  group_by(availability_365) %>%
+  summarize(b_u = sum(price - b_i - mu)/(n() + nar_model_lambda))
+b_v <- train_set %>%
+  left_join(b_i, by = "neighborhood") %>%
+  left_join(b_u, by = "availability_365") %>%
+  group_by(room_type) %>%
+  summarize(b_v = sum(price - b_i - b_u - mu)/(n() + nar_model_lambda))
+
+bv_val_predictions <- validation %>%
+  left_join(b_i, by = "neighborhood") %>%
+  left_join(b_u, by = "availability_365") %>%
+  left_join(b_v, by = "room_type") %>%
+  mutate(predictions = mu + b_i + b_u + b_v) %>%
+  .$predictions
+
+bv_val_reg_rmse <- RMSE(validation$price, bv_val_predictions)
+
+results <- tibble(Model_Type = c(
+  "Mean Model",
+  "Neighborhood Model",
+  "Neighborhood & Availability 365 Model",
+  "Neighborhood, Availability 365, & Room Type Model",
+  "Neighborhood, Availability 365 Model w/ Reg",
+  "Neighborhood, Availability 365, & Room Type w/ Reg"
+), Validation_RMSE = c(
+  validation_mean_model,
+  bi_rmse_validation,
+  bu_rmse_validation,
+  bv_val_rmse,
+  bu_val_reg_rmse,
+  bv_val_reg_rmse
+)) %>%
+  mutate(Validation_RMSE = sprintf("%0.4f", Validation_RMSE))
+results
+```
+
+We achieved an RMSE of 31.8404 - slightly worse than on the test set.
+
+Lastly, let's see how our matrix factorization model does on our validation set.
+
+``` {r matrix factorization validation}
+val_reco <- with(validation, data_memory(
+  user_index = neighborhood, 
+  item_index = room_type, 
+  rating = price))
+results_reco <- r$predict(val_reco, out_memory())
+
+factorization_val_rmse <- RMSE(results_reco, validation$price)
+
+results <- tibble(Model_Type = c(
+  "Mean Model",
+  "Neighborhood Model",
+  "Neighborhood & Availability 365 Model",
+  "Neighborhood, Availability 365, & Room Type Model",
+  "Neighborhood, Availability 365 Model w/ Reg",
+  "Neighborhood, Availability 365, & Room Type w/ Reg",
+  "Matrix Factorization"
+), Validation_RMSE = c(
+  validation_mean_model,
+  bi_rmse_validation,
+  bu_rmse_validation,
+  bv_val_rmse,
+  bu_val_reg_rmse,
+  bv_val_reg_rmse,
+  factorization_val_rmse
+)) %>%
+  mutate(Validation_RMSE = sprintf("%0.4f", Validation_RMSE))
+results
+```
+
+We were still able to achieve an RMSE under 30!
+
+Now let's compare the RMSEs of the models on the test and validation sets.
+
+``` {r RMSE comparison}
+results <- tibble(Model_Type = c(
+  "Mean Model",
+  "Neighborhood Model",
+  "Neighborhood & Availability 365 Model",
+  "Neighborhood, Availability 365, & Room Type Model",
+  "Neighborhood, Availability 365 Model w/ Reg",
+  "Neighborhood, Availability 365, & Room Type w/ Reg",
+  "Matrix Factorization"
+),
+RMSE = c(
+  naive_rmse,
+  bi_rmse,
+  bu_rmse,
+  bv_rmse,
+  bu_reg_rmse,
+  bv_reg_rmse,
+  factorization_rmse
+),
+Validation_RMSE = c(
+  validation_mean_model,
+  bi_rmse_validation,
+  bu_rmse_validation,
+  bv_val_rmse,
+  bu_val_reg_rmse,
+  bv_val_reg_rmse,
+  factorization_val_rmse
+)) %>%
+  mutate(Validation_RMSE = sprintf("%0.5f", Validation_RMSE))
+results
+
+results %>% knitr::kable()
+```
+
+We see our models performed similarly on both the test and validation sets. The matrix factorization models gave us the lowest RMSE when tested on the validation set.
+
+Considering the wide range of prices available in our listings, it is remarkable that we are able to achieve an RMSE under 30.
+
+CONCLUSION
+
+In determining the price of an airbnb, the 
+most significant factors are its location, room type, and availability. The importance of location goes without saying. For room type, the price range for a shared room versus for a hotel room are vastly different. As for availability, the more vacant a rental is, the likelier the landlord is to reduce the price. The more popular the rental is, the price is likely to be higher. 
+
+Price prediction systems are a large subset of real world machine learning uses. The particular tool we've built above could be helpful in suggesting a price to the author of a new listing, indicating to a potential renter that the price is a good deal, or suggesting to a landlord to alter their prices based on the current market.
+
+Some limitations are with the representation of different neighborhoods in our data set. Some neighborhoods are simplier more popular for short-term rentals over others. Therefore, for less popular neighborhoods it may be difficult to accurately predict a listing's price. 
+
+One way to improve the accuracy of our algorithm would be via ensembling with other models. Another method could be via incorporating other factors into our models such as minimum nights or number of reviews.
+
